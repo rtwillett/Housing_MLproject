@@ -1,0 +1,684 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r, echo=F}
+library(ggplot2)
+library(tidyverse)
+library(corrplot)
+library(VIM)
+library(caret)
+library(glmnet)  #LASSO
+library(randomForest)  #RF
+library(e1071)
+```
+
+FUNCTIONS
+```{r}
+# All variables imputed as "None" were specified in the dataset documentation. 
+# "SBrkr" was imputed in Electrical because it is overwhelmingly the most common electrical type.
+# MasVnrTypr was imputed as "None" because that was the most common masonry type.
+
+cat_imputation <- function(df){
+  
+  df.char <- sapply(df, as.character)
+  
+  df.char <- as.data.frame(df.char, stringsAsFactors=F)
+  
+  df_out <- df.char %>% 
+    mutate(
+      Alley = ifelse(is.na(Alley), "None", Alley),
+      MasVnrType = ifelse(is.na(MasVnrType), "None", MasVnrType),
+      BsmtQual = ifelse(is.na(BsmtQual), "None", BsmtQual),
+      BsmtCond = ifelse(is.na(BsmtCond), "None", BsmtCond),
+      BsmtExposure = ifelse(is.na(BsmtExposure), "None", BsmtExposure),
+      BsmtFinType1 = ifelse(is.na(BsmtFinType1), "None", BsmtFinType1),
+      BsmtFinType2 = ifelse(is.na(BsmtFinType2), "None", BsmtFinType2),
+      Electrical = ifelse(is.na(Electrical), "SBrkr", Electrical),
+      FireplaceQu = ifelse(is.na(FireplaceQu), "None", FireplaceQu),
+      GarageQual = ifelse(is.na(GarageQual), "None", GarageQual),
+      GarageFinish = ifelse(is.na(GarageFinish), "None", GarageFinish),
+      GarageType = ifelse(is.na(GarageType), "None", GarageType),
+      GarageCond = ifelse(is.na(GarageCond), "None", GarageCond),
+      PoolQC = ifelse(is.na(PoolQC), "None", PoolQC),
+      Fence = ifelse(is.na(Fence), "None", Fence),
+      MiscFeature = ifelse(is.na(MiscFeature), "None", MiscFeature),
+      SaleType = ifelse(is.na(SaleType), "Oth", SaleType),
+      Functional = ifelse(is.na(Functional), "Typ", Functional),
+      KitchenQual = ifelse(is.na(KitchenQual), "TA", KitchenQual),
+      Exterior1st = ifelse(is.na(Exterior1st), "VinylSd", Exterior1st),
+      Exterior2nd = ifelse(is.na(Exterior2nd), "VinylSd", Exterior2nd),
+      KitchenQual = ifelse(is.na(KitchenQual), "TA", KitchenQual),
+      Utilities = ifelse(is.na(Utilities), "AllPub", Utilities),
+      MSZoning = ifelse(is.na(MSZoning), "RL", MSZoning))
+  
+  df_return <- as.data.frame(lapply(df_out, as.factor))
+  
+  return(df_return)
+}
+
+factor_scale <- function(df_cat){
+  
+  df.numfac <- sapply(df_cat, as.numeric) # Converting factor to number
+  df.numfacScale <- scale(df.numfac, scale = T, center = T) # Converting factor to number
+  
+  return(df.numfacScale)
+}
+
+dummify <- function(df_nodummy){
+  
+  dummies <- dummyVars("~.", data=df_nodummy)
+
+  df.dmy <- data.frame(predict(dummies, newdata = df_nodummy))
+  
+  return(df.dmy)
+}
+
+kaggle_submit_format <- function(model, modnum) {
+  filename <- paste0("output", modnum, ".csv")
+  
+  temp_df <- data.frame(test_ids, sapply(model, exp))
+  colnames(temp_df) <- c("Id", "SalePrice")
+  write.csv(temp_df, file = filename, row.names = F)
+}
+
+```
+
+
+IMPORTING THE TRAINING AND TEST DATA
+```{r}
+housing <- read.csv("train.csv")
+housing_test <- read.csv("test.csv")
+```
+
+STORING VECTORS TO BE USED LATER
+```{r}
+test_ids <- housing_test$Id
+salesprice <- housing$SalePrice
+sp <- sapply(salesprice, log)
+```
+
+SUBSETTING THE DATA BASED ON VARIABLE TYPE (NUMERICAL OR FACTOR)
+```{r}
+# Subsetting the data based on data type
+housing <- housing %>% column_to_rownames("Id")
+
+housing_cat <- housing[, map_lgl(housing, is.factor)]
+housing_int <- housing[, map_lgl(housing, is.numeric)]
+```
+
+KNN IMPUTATION OF NUMERICAL VARIABLES
+```{r}
+# KNN imputation of numerical variables
+housing_int.imp <- kNN(housing_int, k=10)
+housing_int.imp <- housing_int.imp[,1:37]
+```
+
+IMPUTATION OF CATEGORICAL VARIABLES (TRAINING)
+```{r}
+housing_cat.imp <- cat_imputation(housing_cat)
+```
+
+Conversion of ordinal categoricals to ranked scaled numerical data
+```{r}
+catvar_vec <- c('ExterQual', 'ExterCond', 'BsmtQual', 'BsmtCond', 'HeatingQC', 'KitchenQual', 'FireplaceQu', 'GarageQual', 'GarageCond', 'PoolQC')
+
+housing_cat.ordinal <- housing_cat.imp[catvar_vec]
+
+housing_cat.ordinal <- sapply(housing_cat.ordinal, function(x) case_when(
+      x == "Ex" ~ 5,
+      x == "Gd" ~ 4,
+      x == "TA" ~ 3,
+      x == "Fa" ~ 2,
+      x == "Po" ~ 1,
+      x == "None" ~ 0
+    ))
+housing_cat.ordinal <- as.data.frame(scale(housing_cat.ordinal))
+```
+
+```{r}
+#Selecting all categoricals not in the ordinal list
+housing.truecat <- housing_cat.imp[!(names(housing_cat.imp) %in% catvar_vec)]
+```
+
+
+IMPUTATION OF CATEGORICAL VARIABLES (TESTING)
+```{r}
+housing_test.cat <- housing_test[, map_lgl(housing_test, is.factor)]
+
+housing_test.cat.imp <- cat_imputation(housing_test.cat)
+housing_test.cat.ordinal <- housing_test.cat.imp[catvar_vec]
+housing_test.cat.ordinal <- sapply(housing_test.cat.ordinal, function(x) case_when(
+                                                                    x == "Ex" ~ 5,
+                                                                    x == "Gd" ~ 4,
+                                                                    x == "TA" ~ 3,
+                                                                    x == "Fa" ~ 2,
+                                                                    x == "Po" ~ 1,
+                                                                    x == "None" ~ 0
+                                                                  ))
+housing_test.cat.ordinal <- as.data.frame(scale(housing_test.cat.ordinal))
+
+housing_test.truecat <- housing_cat.imp[!(names(housing_test.cat.imp) %in% catvar_vec)]
+```
+
+EDA
+```{r}
+t <- theme_classic()
+
+ggplot(housing_int.imp, aes(x=GarageCars, y=SalePrice)) +
+  geom_jitter(alpha=0.5) + t +
+  geom_smooth(method="lm", se = F)
+
+ggplot(housing, aes(x=OverallQual, y=SalePrice, col=Neighborhood)) +
+  geom_jitter(alpha=0.5) + t 
+
+ggplot(housing, aes(x=PavedDrive, y=SalePrice)) +
+  geom_jitter(alpha=0.5) + t 
+
+ggplot(housing, aes(x=OverallQual, y=SalePrice)) +
+  geom_jitter(alpha=0.5) + t +
+  facet_wrap(~Neighborhood)#+ geom_smooth(method="lm", se = F)
+```
+
+LASSO (for feature selection)
+```{r}
+
+x = model.matrix(SalePrice ~ ., housing_int.imp)[, -1] #Dropping the intercept column.
+y = housing_int.imp$SalePrice
+
+grid = 10^seq(5, -2, length = 100)
+```
+
+```{r}
+lasso.models.housingint = glmnet(x, y, alpha = 1, lambda = grid)
+```
+
+```{r}
+coef(lasso.models.housingint)
+```
+
+```{r}
+plot(lasso.models.housingint, xvar = "lambda", label = TRUE, main = "Lasso Regression")
+```
+
+Exporting LASSO features from analysis output
+```{r}
+features <- coef(lasso.models.housingint)[-1, 30]
+features <- sort(abs(features), decreasing = T)
+features <- features[features>10]
+
+feature_names <- names(features)
+feature_names
+```
+
+
+PREPROCESSING OF TRAINING DATA
+Binding together scaled, centered, and LASSO selected int variables with categorical variables. Also adding SalesPrice into training data
+```{r}
+housing_int.features <- housing_int.imp[feature_names]
+housing_int.scaledfeatures <- as.data.frame(scale(housing_int.features))
+
+housing_train_proc <- cbind(housing_int.scaledfeatures, housing_cat.ordinal)
+housing_train_proc <- cbind(housing_train_proc, sp)
+```
+
+IMPUTATION OF CONTINUOUS VARIABLES (TEST)
+```{r}
+housing_test.int.features <- housing_test[feature_names]
+housing_test.int.features <- kNN(housing_test.int.features, k=10)
+housing_test.int.features <- housing_test.int.features[,1:17]
+
+housing_test.int.features <- as.data.frame(scale(housing_test.int.features))
+
+housing_test_proc <- cbind(housing_test.int.features, housing_test.cat.ordinal)
+```
+
+
+PREPROCESSING OF TEST DATA
+```{r}
+
+# housing_test.cat <- housing_test[, map_lgl(housing_test, is.factor)]
+# 
+# housing_test.cat.imp <- cat_imputation(housing_test.cat)
+# 
+# housing_test.int.features <- housing_test[feature_names]
+# housing_test.int.features <- kNN(housing_test.int.features, k=10)
+# housing_test.int.features <- housing_test.int.features[,1:17]
+# 
+# housing_test.int.scaledfeatures <- as.data.frame(scale(housing_test.int.features))
+# 
+# housing_test_proc <- cbind(housing_test.int.scaledfeatures, housing_test.cat.imp)
+```
+
+
+#### MODEL 6 ####
+
+```{r}
+housing_train_proc6 <- cbind(housing.truecat, sp)
+
+# droplist <- c("Utilities", "HouseStyle", "Condition2", "RoofMatl", "Exterior1st","Exterior2nd", "Heating", "Electrical", "MiscFeature")
+
+# housing_train_proc6 <- housing_train_proc6[!(colnames(housing_train_proc6) %in% droplist)]
+```
+
+```{r}
+set.seed(314)
+rf.housing <- randomForest(sp ~., 
+                           data=housing_train_proc6, 
+                           # subset=train, 
+                           importance = T)
+rf.housing
+plot(rf.housing)
+```
+
+```{r}
+set.seed(0)
+oob.err = numeric(32)
+for (mtry in 1:32) {
+  fit = randomForest(sp ~ ., data = housing_train_proc6, mtry = mtry)
+  oob.err[mtry] = fit$mse[500]
+  cat("We're performing iteration", mtry, "\n")
+}
+```
+
+```{r}
+plot(1:32, oob.err, pch = 16, type = "b",
+     xlab = "Variables Considered at Each Split",
+     ylab = "OOB Mean Squared Error",
+     main = "Random Forest OOB Error Rates\nby # of Variables")
+```
+
+```{r}
+importance(rf.housing)
+varImpPlot(rf.housing)
+```
+
+```{r}
+rf.sigvars <- names(sort(importance(rf.housing)[,1], decreasing = T))
+```
+
+```{r}
+rf.rankedvars <- sort(importance(rf.housing)[,1], decreasing = T) 
+rf.sigvars <- names(rf.rankedvars [rf.rankedvars >5]) # Names of vars with %IncMSE
+```
+
+Removal of problematic features
+```{r}
+housing_cat.imp$Utilities <- NULL
+housing_cat.imp$HouseStyle <- NULL
+housing_cat.imp$Condition2 <- NULL
+housing_cat.imp$RoofMatl <- NULL
+housing_cat.imp$Exterior1st <- NULL
+housing_cat.imp$Exterior2nd <- NULL
+housing_cat.imp$Heating <- NULL
+housing_cat.imp$Electrical <- NULL
+housing_cat.imp$GarageQual <- NULL
+housing_cat.imp$PoolQC <- NULL
+housing_cat.imp$MiscFeature <- NULL
+
+housing_test$HouseStyle <- NULL
+housing_test$Condition2 <- NULL
+housing_test$RoofMatl <- NULL
+housing_test$Heating <- NULL
+housing_test$MiscFeature <- NULL
+```
+
+PREPROCESSING OF TRAINING DATA
+Binding together scaled, centered, and LASSO selected int variables with categorical variables. Also adding SalesPrice into training data
+```{r}
+housing_cat.rfvars <- housing_cat.imp[rf.sigvars]
+
+housing_cat.dmy6 <- dummify(housing_cat.rfvars)
+
+```
+
+```{r}
+housing_train_proc6 <- cbind(housing_int.scaledfeatures, housing_cat.dmy6)
+housing_train_proc6 <- cbind(housing_train_proc6, sp)
+```
+
+
+PREPROCESSING OF TEST DATA
+```{r}
+test_ids <- housing_test$Id
+
+housing_test.cat <- housing_test[, map_lgl(housing_test, is.factor)]
+
+housing_test.cat.imp <- cat_imputation(housing_test.cat)
+housing_test.cat.imp$Utilities <- NULL
+housing_test.cat.imp$Exterior1st <- NULL
+housing_test.cat.imp$Exterior2nd <- NULL
+housing_test.cat.imp$GarageQual <- NULL
+housing_test.cat.imp$Electrical <- NULL
+housing_test.cat.imp$PoolQC <- NULL
+
+housing_test.cat.rfvars <- housing_test.cat.imp[rf.sigvars]
+housing_test.cat.dmy6 <- dummify(housing_test.cat.rfvars)
+
+housing_test.int.features6 <- housing_test[feature_names]
+housing_test.int.features6 <- kNN(housing_test.int.features6, k=10)
+housing_test.int.features6 <- housing_test.int.features6[,1:17]
+
+housing_test.int.features6 <- as.data.frame(scale(housing_test.int.features6))
+
+housing_test_proc6 <- cbind(housing_test.int.features6, housing_test.cat.dmy6)
+```
+
+```{r}
+set.seed(314)
+knn_mod6 <- train(sp ~ .,
+                  data = housing_train_proc6, 
+                  tuneGrid=expand.grid(k=1:70),
+                  method = "knn", 
+                  tuneLength = 20, 
+                  trControl = trControl)
+```
+
+```{r}
+knn_mod6
+```
+
+```{r}
+plot(knn_mod6)
+```
+
+```{r}
+varImp(knn_mod6)
+```
+
+
+```{r}
+pred_knn6 <- predict(knn_mod6, newdata=housing_test_proc6)
+```
+
+
+```{r}
+output6 <- data.frame(test_ids, sapply(pred_knn6, exp))
+colnames(output6) <- c("Id", "SalePrice")
+```
+
+```{r}
+write.csv(output6, file="output6.csv", row.names = F)
+```
+
+#### RANDOM FOREST ####
+
+```{r}
+library(randomForest)
+```
+
+```{r}
+housing_train_proc8 <- housing_train_proc
+housing_test_proc8 <- housing_test_proc
+
+housing_train_proc8$Utilities <- NULL
+housing_train_proc8$HouseStyle <- NULL
+housing_train_proc8$Condition2 <- NULL
+housing_train_proc8$RoofMatl <- NULL
+housing_train_proc8$Exterior1st <- NULL
+housing_train_proc8$Exterior2nd <- NULL
+housing_train_proc8$Heating <- NULL
+housing_train_proc8$Electrical <- NULL
+housing_train_proc8$GarageQual <- NULL
+housing_train_proc8$PoolQC <- NULL
+housing_train_proc8$MiscFeature <- NULL
+
+housing_test_proc8$Id <- NULL
+housing_test_proc8$Utilities <- NULL
+housing_test_proc8$HouseStyle <- NULL
+housing_test_proc8$Condition2 <- NULL
+housing_test_proc8$RoofMatl <- NULL
+housing_test_proc8$Exterior1st <- NULL
+housing_test_proc8$Exterior2nd <- NULL
+housing_test_proc8$Heating <- NULL
+housing_test_proc8$Electrical <- NULL
+housing_test_proc8$GarageQual <- NULL
+housing_test_proc8$PoolQC <- NULL
+housing_test_proc8$MiscFeature <- NULL
+
+```
+
+
+```{r}
+set.seed(314)
+rf.housing2 <- randomForest(sp ~., 
+                           data=housing_train_proc8, 
+                           # subset=train, 
+                           importance = T,
+                           mtry=15, 
+                           ntree=1000)
+rf.housing2
+```
+
+```{r}
+plot(rf.housing2)
+```
+
+
+```{r}
+set.seed(0)
+oob.err = numeric(67)
+for (mtry in 1:67) {
+  fit = randomForest(sp ~ ., data = housing_train_proc8, mtry = mtry)
+  oob.err[mtry] = fit$mse[500]
+  cat("We're performing iteration", mtry, "\n")
+}
+```
+
+```{r}
+plot(1:67, oob.err, pch = 16, type = "b",
+     xlab = "Variables Considered at Each Split",
+     ylab = "OOB Mean Squared Error",
+     main = "Random Forest OOB Error Rates\nby # of Variables")
+```
+
+```{r}
+importance(rf.housing2)
+varImpPlot(rf.housing2)
+```
+
+```{r}
+pred_rf2 <- predict(rf.housing2, newdata = housing_test_proc8, predict.all=T)
+```
+
+
+```{r}
+output7 <- data.frame(test_ids, sapply(pred_rf2$aggregate, exp))
+colnames(output7) <- c("Id", "SalePrice")
+```
+
+```{r}
+write.csv(output7, file="output7.csv", row.names = F)
+```
+
+
+#### Ridge Regression #### (MODEL 9)
+
+```{r}
+catvar_vec <- c('ExterQual', 'ExterCond', 'BsmtQual', 'BsmtCond', 'HeatingQC', 'KitchenQual', 'FireplaceQu', 'GarageQual', 'GarageCond', 'PoolQC')
+
+housing_cat.imp9 <- housing_cat.imp[catvar_vec]
+
+housing_cat.imp9 <- sapply(housing_cat.imp9, function(x) case_when(
+      x == "Ex" ~ 5,
+      x == "Gd" ~ 4,
+      x == "TA" ~ 3,
+      x == "Fa" ~ 2,
+      x == "Po" ~ 1,
+      x == "None" ~ 0
+    ))
+```
+
+
+```{r}
+housing_cat.scaled9 <- as.data.frame(scale(housing_cat.imp9))
+
+# housing_cat.dmy <- dummify(housing_cat.imp)
+
+housing_train_proc9 <- cbind(housing_int.scaledfeatures, housing_cat.scaled9)
+housing_train_proc9 <- cbind(housing_train_proc9, sp)
+```
+
+PREPROCESSING TESTING DATA
+
+```{r}
+housing_test.cat9 <- housing_test[, map_lgl(housing_test, is.factor)]
+
+housing_test.cat9.imp <- cat_imputation(housing_test.cat9)
+housing_test.cat9.imp <- housing_test.cat9.imp[catvar_vec]
+housing_test.cat9.imp <- sapply(housing_test.cat9.imp, function(x) case_when(
+                                                                    x == "Ex" ~ 5,
+                                                                    x == "Gd" ~ 4,
+                                                                    x == "TA" ~ 3,
+                                                                    x == "Fa" ~ 2,
+                                                                    x == "Po" ~ 1,
+                                                                    x == "None" ~ 0
+                                                                  ))
+housing_test.cat9.imp <- as.data.frame(scale(housing_test.cat9.imp))
+
+
+housing_test.int.features9 <- housing_test[feature_names]
+housing_test.int.features9 <- kNN(housing_test.int.features9, k=10)
+housing_test.int.features9 <- housing_test.int.features9[,1:17]
+
+housing_test.int.features9 <- as.data.frame(scale(housing_test.int.features9))
+
+housing_test_proc9 <- cbind(housing_test.int.features9, housing_test.cat9.imp)
+```
+
+DUMMIFYING AND ADDING NEIGHBORHOOD VARIABLE
+```{r}
+neighborhood <- dummify(housing[,"Neighborhood", drop=F])
+neighborhood_test <- dummify(housing_test[,"Neighborhood", drop=F])
+
+housing_train_proc9 <- cbind(housing_train_proc9, neighborhood)
+housing_test_proc9 <- cbind(housing_test_proc9, neighborhood_test)
+```
+
+
+```{r}
+ggplot(housing_train_proc9, aes(x = HeatingQC, y =sp)) + 
+  geom_jitter(alpha=0.5)
+```
+
+
+```{r}
+library(glmnet)
+set.seed(0)
+grid <- 10^seq(5, -2, length = 100)
+
+x <-  model.matrix(sp ~ ., housing_train_proc9)[, -1] #Dropping the intercept column.
+y <-  housing_train_proc9$sp
+
+ridge.housing = glmnet(x, y, alpha = 0, lambda = grid)
+dim(coef(ridge.housing))
+coef(ridge.housing) 
+```
+
+
+
+#Visualizing the ridge regression shrinkage.
+```{r}
+plot(ridge.housing, xvar = "lambda", label = TRUE, main = "Ridge Regression")
+```
+
+
+#Can use the predict() function to obtain ridge regression coefficients for a
+#new value of lambda, not necessarily one that was within our grid:
+```{r}
+# predict(ridge.housing, s = 50, type = "coefficients")
+```
+
+#Creating training and testing sets. Here we decide to use a 70-30 split with
+#approximately 70% of our data in the training set and 30% of our data in the
+#test set.
+```{r}
+# set.seed(0)
+# train = sample(1:nrow(x), 7*nrow(x)/10)
+# test = (-train)
+# y.test = y[test]
+# 
+# length(train)/nrow(x)
+# length(y.test)/nrow(x)
+```
+
+#Let's attempt to fit a ridge regression using some arbitrary value of lambda;
+#we still have not yet figured out what the best value of lambda should be!
+#We will arbitrarily choose 5. We will now use the training set exclusively.
+
+```{r}
+ridge.housing.train = glmnet(x[train, ], y[train], alpha = 0, lambda = grid)
+ridge.lambda5 = predict(ridge.housing.train, s = 5, newx = x[test, ])
+mean((ridge.lambda5 - y.test)^2)
+```
+
+
+#Here, the MSE is approximately 115,541.
+
+#What would happen if we fit a ridge regression with an extremely large value
+#of lambda? Essentially, fitting a model with only an intercept:
+```{r}
+# ridge.largelambda = predict(ridge.housing.train, s = 1e10, newx = x[test, ])
+# mean((ridge.largelambda - y.test)^2)
+```
+
+
+#Here, the MSE is much worse at aproximately 208,920.
+
+#Instead of arbitrarily choosing random lambda values and calculating the MSE
+#manually, it's a better idea to perform cross-validation in order to choose
+#the best lambda over a slew of values.
+
+#Running 10-fold cross validation.
+```{r}
+set.seed(0)
+cv.ridge.out = cv.glmnet(x[train, ], y[train],
+                         lambda = grid, alpha = 0, nfolds = 10)
+plot(cv.ridge.out, main = "Ridge Regression\n")
+bestlambda.ridge = cv.ridge.out$lambda.min
+bestlambda.ridge
+log(bestlambda.ridge)
+```
+
+
+#What is the test MSE associated with this best value of lambda?
+```{r}
+# ridge.bestlambdatrain = predict(ridge.housing.train, s = bestlambda.ridge, newx = x[test, ])
+# mean((ridge.bestlambdatrain - y.test)^2)
+```
+
+
+#Here the MSE is lower at approximately 113,173; a further improvement
+#on that which we have seen above. With "cv.ridge.out", we can actually access
+#the best model from the cross validation without calling "ridge.models.train"
+#or "bestlambda.ridge":
+```{r}
+ridge.bestlambdatrain <-  predict.cv.glmnet(cv.ridge.out, s ="lambda.min", newx = as.matrix(housing_test_proc9))
+# mean((ridge.bestlambdatrain - y.test)^2)
+```
+
+```{r}
+output9 <- data.frame(test_ids, sapply(ridge.bestlambdatrain, exp))
+colnames(output9) <- c("Id", "SalePrice")
+```
+
+```{r}
+write.csv(output9, file="output9.csv", row.names = F)
+```
+
+
+
+
+
+
+
+
+
+EDA ON OUTPUTS
+```{r}
+ggplot(output8, aes(x=Id, y=SalePrice)) + 
+  geom_line(col="darkred") + t +
+  labs(title="Signal in the Noise?", caption="LASSO/RF/KNN model")
+```
+
