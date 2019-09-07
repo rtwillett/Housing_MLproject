@@ -15,6 +15,7 @@ library(randomForest)  #RF
 library(e1071)  # SVR
 library(neuralnet) #NN 
 library(adabag)  # AdaBoost
+library(xgboost)
 
 setwd("~/NYCDSA/ML_projects/AmesHousing")
 ```
@@ -440,7 +441,7 @@ trControl <- trainControl(method = "repeatedcv",
 ```{r}
 set.seed(314)
 knn_mod6 <- train(sp ~ .,
-                  data = housing_train_pca, 
+                  data = housing_train_proc6, 
                   tuneGrid=expand.grid(k=1:30),
                   method = "knn", 
                   tuneLength = 20, 
@@ -461,7 +462,7 @@ varImp(knn_mod6)
 
 
 ```{r}
-pred_knn6 <- predict(knn_mod6, newdata=housing_test_pca)  
+pred_knn6 <- predict(knn_mod6, newdata=housing_test_proc6)  
 ```
 
 ```{r}
@@ -751,6 +752,101 @@ write.csv(output10, file="output10.csv", row.names = F)
 saveRDS(svr.housing.tuned, "svr_tuned.rds")
 ```
 
+#### XGBoost #### (Model 10)
+```{r}
+
+```
+
+
+```{r}
+feature_names <- names(housing_test_Full)
+
+dtrain <- xgb.DMatrix(data = as.matrix(housing_train_Full[,feature_names]), label = sp)
+dtest <- xgb.DMatrix(data = as.matrix(housing_test_Full))
+```
+
+```{r}
+# Set up cross-validation scheme (3-fold)
+foldsCV <- createFolds(sp, k=7, list=TRUE, returnTrain=FALSE)
+```
+
+```{r}
+param <- list(booster = "gblinear"
+              , objective = "reg:linear"
+              , subsample = 0.7
+              , max_depth = 5
+              , colsample_bytree = 0.7
+              , eta = 0.037
+              , eval_metric = 'mae'
+              , base_score = 0.012 #average
+              , min_child_weight = 100)
+```
+
+```{r}
+xgb_cv <- xgb.cv(data=dtrain,
+                 params=param,
+                nrounds=100,
+                prediction=TRUE,
+                maximize=FALSE,
+                folds=foldsCV,
+                early_stopping_rounds = 30,
+                print_every_n = 5
+)
+```
+
+```{r}
+# Check best results and get best nrounds
+print(xgb_cv$evaluation_log[which.min(xgb_cv$evaluation_log$test_mae_mean)])
+nrounds <- xgb_cv$best_iteration
+```
+
+```{r}
+################
+# Final model
+################
+
+xgb <- xgb.train(params = param
+                 , data = dtrain
+                # , watchlist = list(train = dtrain)
+                 , nrounds = nrounds
+                 , verbose = 1
+                 , print_every_n = 5
+                 #, feval = amm_mae
+                )
+```
+
+```{r}
+# Feature Importance
+importance_matrix <- xgb.importance(feature_names,model=xgb)
+xgb.plot.importance(importance_matrix[1:10,])
+```
+
+```{r}
+# Predict
+preds <- predict(xgb,dtest)
+```
+
+
+```{r}
+kaggle_submit_format(preds, 11)
+```
+
+```{r}
+output10 <- data.frame(train_ids, sapply(pred_svr, exp))
+colnames(output10) <- c("Id", "SalePrice")
+```
+
+```{r}
+# write.csv(output10, file="output10.csv", row.names = F)
+```
+
+```{r}
+saveRDS(svr.housing.tuned, "xgboost_mod.rds")
+```
+
+
+References: 
+https://www.kaggle.com/talcapa/simple-xgboost-with-linear-model-in-r
 
 #### Neural Network #### 
 
@@ -809,16 +905,6 @@ write.csv(output, file="output12t.csv", row.names = F)
 
 ```{r}
 saveRDS(nn, "nn.rds")
-```
-
-
-#### Visualization of Training data ####
-
-```{r}
-pred_train <- read.csv("predictions_training.csv")
-pred_train <- cbind(pred_train, salesprice)
-
-pred_test <- read.csv("predictions_test.csv")
 ```
 
 
