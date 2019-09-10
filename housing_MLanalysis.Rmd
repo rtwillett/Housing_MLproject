@@ -315,6 +315,7 @@ coef(lasso.models.housingint)
 plot(lasso.models.housingint, xvar = "lambda", label = TRUE, main = "Lasso Regression")
 ```
 
+
 Exporting LASSO features from analysis output
 ```{r}
 features <- coef(lasso.models.housingint)[-1, 90]
@@ -664,7 +665,6 @@ coef(ridge.housing)
 ```
 
 
-
 #Visualizing the ridge regression shrinkage.
 ```{r}
 plot(ridge.housing, xvar = "lambda", label = TRUE, main = "Ridge Regression")
@@ -753,10 +753,6 @@ saveRDS(svr.housing.tuned, "svr_tuned.rds")
 ```
 
 #### XGBoost #### (Model 10)
-```{r}
-
-```
-
 
 ```{r}
 feature_names <- names(housing_test_Full)
@@ -848,6 +844,80 @@ saveRDS(svr.housing.tuned, "xgboost_mod.rds")
 References: 
 https://www.kaggle.com/talcapa/simple-xgboost-with-linear-model-in-r
 
+#### LASSO Model #### 
+```{r}
+set.seed(1205)
+lasso_mod <- cv.glmnet(x, y, lambda=grid, alpha=1, nfold=10)
+```
+
+```{r}
+plot(lasso_mod, main = "Lasso Regression\n")
+bestlambda.lasso = lasso_mod$lambda.min
+bestlambda.lasso
+log(bestlambda.lasso)
+```
+
+```{r}
+lasso.bestlambdatrain = predict(lasso_mod, s = bestlambda.lasso, newx = as.matrix(housing_test_Full))
+# mean((lasso.bestlambdatrain - y.test)^2)
+```
+
+
+```{r}
+kaggle_submit_format(lasso.bestlambdatrain, 12)
+```
+
+
+```{r}
+saveRDS(lasso.bestlambdatrain, "lasso_mod.rds")
+```
+
+
+#### ElasticNet Model #### 
+
+```{r}
+# Build the model using the training set
+set.seed(123)
+EN_model <- train(
+  sp ~., data = housing_train_Full, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneLength = 10
+)
+# Best tuning parameter
+EN_model$bestTune
+```
+
+```{r}
+# Coefficient of the final model. You need
+# to specify the best lambda
+coef(EN_model$finalModel, EN_model$bestTune$lambda)
+```
+
+```{r}
+set.seed(1205)
+EN.fit_mod <- glmnet(x, y, lambda=EN_model$bestTune[2], alpha=EN_model$bestTune[1])
+```
+
+```{r}
+ENtrain_pred = predict(EN.fit_mod, newx = as.matrix(housing_test_Full))
+# mean((lasso.bestlambdatrain - y.test)^2)
+```
+
+
+```{r}
+kaggle_submit_format(ENtrain_pred, 13)
+```
+
+
+```{r}
+saveRDS(EN.fit_mod, "ElasticNet_mod.rds")
+```
+
+
+Reference: 
+http://www.sthda.com/english/articles/37-model-selection-essentials-in-r/153-penalized-regression-essentials-ridge-lasso-elastic-net/#ridge-regression
+
+
 #### Neural Network #### 
 
 ```{r}
@@ -909,6 +979,40 @@ saveRDS(nn, "nn.rds")
 
 
 #### ENSEMBLE MODEL 1 #### (Simple Average)
+
+```{r}
+ridge_pred <- read.csv("output9.csv")
+xgboost_pred <- read.csv("output11.csv")
+lasso_pred <- read.csv("output12.csv")
+enet_pred <- read.csv("output13.csv")
+svr_pred <- read.csv("output10.csv")
+rf_pred <- read.csv("output7.csv")
+knn_pred <- read.csv("output6.csv")
+```
+
+```{r}
+preds <- Reduce(function(x,y) merge(x,y,by="Id",all=TRUE) ,list(ridge_pred,xgboost_pred,lasso_pred, enet_pred))
+colnames(preds) <- c("id", "ridge", "xgboost", "lasso", "enet")
+preds
+
+preds2 <- Reduce(function(x,y) merge(x,y,by="Id",all=TRUE) ,list(ridge_pred,xgboost_pred,lasso_pred, enet_pred, svr_pred, rf_pred, knn_pred))
+colnames(preds2) <- c("id", "ridge", "xgboost", "lasso", "enet", "svr_pred", "rf_pred", "knn_pred")
+preds2
+```
+
+
+```{r}
+ensemble_preds <- preds %>% mutate(avg_preds = log((ridge + xgboost + lasso + enet)/4))
+kaggle_submit_format(ensemble_preds$avg_preds, 21)
+```
+
+Ensembling the linear models may not be the best approach because most of the predictions are highly correlated, thus adding the additional models is not adding more information to the model.
+```{r}
+cor(ensemble_preds[,-6])
+cor(preds2)
+```
+
+
 ```{r}
 pred_test3 <- read.csv("predictions_test.csv")
 ensemble_id_test <- pred_test3$Id
@@ -940,6 +1044,8 @@ write.csv(output, file="ensemble_means.csv", row.names = F)
 
 
 #### ENSEMBLE MODEL 2 ####
+
+
 
 ```{r}
 metric <- "RMSE"
